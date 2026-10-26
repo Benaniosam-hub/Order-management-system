@@ -1,0 +1,1 @@
+API_GATEWAY_URL = "https://uezop61wd0.execute-api.us-east-1.amazonaws.com/dev"
