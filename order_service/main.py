@@ -1,15 +1,15 @@
-import json
+
+import asyncio
 import logging
 import uuid
 
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Annotated
 
 import boto3
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 
 from order_service.config import (
@@ -19,6 +19,7 @@ from order_service.config import (
 )
 
 
+# Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,52 @@ def error_response(
     )
 
 
+# Asynchronous SNS notification method
+async def send_order_notification(order_id: str):
+
+    message = (
+        "Your order successfully placed and order id "
+        + order_id
+    )
+
+    # Log the notification message
+    logger.info("SNS notification message: %s", message)
+
+    # Check SNS configuration
+    if not SNS_TOPIC_ARN:
+        logger.error(
+            "SNS topic ARN is not configured for order %s",
+            order_id,
+        )
+        return
+
+    try:
+        # Publish SNS message without blocking the event loop
+        response = await asyncio.to_thread(
+            sns.publish,
+            TopicArn=SNS_TOPIC_ARN,
+            Subject="Order Confirmation",
+            Message=message,
+        )
+
+        logger.info(
+            "SNS notification published successfully for order %s",
+            order_id,
+        )
+
+        logger.info(
+            "SNS Message ID: %s",
+            response["MessageId"],
+        )
+
+    except (ClientError, BotoCoreError):
+        logger.exception(
+            "SNS notification failed for order %s",
+            order_id,
+        )
+
+
+# Home route
 @app.get("/")
 def home():
     return {
@@ -85,23 +132,20 @@ def home():
     }
 
 
+# Create order endpoint
 @app.post(
     "/orders",
     status_code=status.HTTP_201_CREATED,
 )
-def create_order(payload: OrderCreate):
-    # Step 1: Validate SNS configuration.
-    if not SNS_TOPIC_ARN:
-        error_response(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "SNS_NOT_CONFIGURED",
-            "SNS topic ARN is not configured.",
-        )
+def create_order(
+    payload: OrderCreate,
+    background_tasks: BackgroundTasks,
+):
 
-    # Step 2: Generate a dynamic order ID.
+    # Step 1: Generate a dynamic order ID
     order_id = f"ORD-{uuid.uuid4()}"
 
-    # Step 3: Prepare the DynamoDB payload.
+    # Step 2: Prepare the DynamoDB payload
     order = {
         "order_id": order_id,
         "customer_id": payload.customer_id,
@@ -116,14 +160,20 @@ def create_order(payload: OrderCreate):
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Step 4: Insert the order into DynamoDB.
+    # Step 3: Insert the order into DynamoDB
     try:
         orders_table.put_item(
             Item=order,
             ConditionExpression="attribute_not_exists(order_id)",
         )
 
+        logger.info(
+            "Order saved successfully: %s",
+            order_id,
+        )
+
     except ClientError as exc:
+
         error = exc.response.get("Error", {})
         aws_code = error.get("Code", "UnknownError")
 
@@ -169,6 +219,7 @@ def create_order(payload: OrderCreate):
         )
 
     except BotoCoreError:
+
         logger.exception(
             "DynamoDB connection failed for order %s",
             order_id,
@@ -180,44 +231,17 @@ def create_order(payload: OrderCreate):
             "DynamoDB is temporarily unavailable.",
         )
 
-    # Step 5: Publish the SNS notification.
-    message = (
-        "Your order successfully placed and order id "
-        + order_id
+    # Step 4: Schedule SNS notification in background
+    background_tasks.add_task(
+        send_order_notification,
+        order_id,
     )
 
-    try:
-        sns.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Subject="Order Confirmation",
-            Message=message,
-        )
-
-    except (ClientError, BotoCoreError):
-        logger.exception(
-            "Order %s was saved, but SNS publishing failed",
-            order_id,
-        )
-
-        # The order has already been saved.
-        # Do not claim that the order was never created.
-        error_response(
-            status.HTTP_502_BAD_GATEWAY,
-            "ORDER_SAVED_NOTIFICATION_FAILED",
-            (
-                "The order was saved successfully, but the "
-                "notification could not be published. "
-                "The order exists; do not submit it again "
-                "without checking its status."
-            ),
-            order_id=order_id,
-        )
-
-    # Step 6: Return success.
+    # Step 5: Return success without waiting for SNS
     return {
         "success": True,
         "message": "Order placed successfully.",
         "order_id": order_id,
         "status": "PLACED",
-        "notification_status": "PUBLISHED",
+        "notification_status": "SCHEDULED",
     }
