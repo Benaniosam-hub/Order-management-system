@@ -83,14 +83,14 @@ def error_response(
 
 
 # Customer validation
-def validate_customer(
-    client: httpx.Client,
+async def validate_customer(
+    client: httpx.AsyncClient,
     customer_id: str,
 ):
     url = f"{CUSTOMER_SERVICE_URL}/customers/{customer_id}"
 
     try:
-        response = client.get(url)
+        response = await client.get(url)
 
         if response.status_code == 404:
             return False
@@ -125,15 +125,15 @@ def validate_customer(
 
 
 # Product and stock validation
-def validate_product(
-    client: httpx.Client,
+async def validate_product(
+    client: httpx.AsyncClient,
     product_id: str,
     requested_quantity: int,
 ):
     url = f"{PRODUCT_SERVICE_URL}/products/{product_id}"
 
     try:
-        response = client.get(url)
+        response = await client.get(url)
 
         if response.status_code == 404:
             return {
@@ -254,7 +254,7 @@ def home():
     "/orders",
     status_code=status.HTTP_201_CREATED,
 )
-def create_order(
+async def create_order(
     payload: OrderCreate,
     background_tasks: BackgroundTasks,
 ):
