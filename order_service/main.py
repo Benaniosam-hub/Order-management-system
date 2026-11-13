@@ -13,6 +13,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 
+from order_service.sqs_publisher import publish_cancellation_event
+
 from order_service.config import (
     AWS_REGION,
     ORDERS_TABLE,
@@ -437,6 +439,105 @@ async def delete_order(order_id: str):
             "DynamoDB is temporarily unavailable.",
         )
 
+# --------------------------------------------------
+# CANCEL ORDER
+# --------------------------------------------------
+
+@app.post("/orders/{order_id}/cancel")
+async def request_order_cancellation(order_id: str):
+
+    # Step 1: Validate order
+    try:
+        response = await asyncio.to_thread(
+            orders_table.get_item,
+            Key={"order_id": order_id},
+            ConsistentRead=True,
+        )
+
+        order = response.get("Item")
+
+        if not order:
+            error_response(
+                status.HTTP_404_NOT_FOUND,
+                "ORDER_NOT_FOUND",
+                f"Order {order_id} does not exist.",
+            )
+
+        # Step 2: Check order status
+        if order.get("status") == "CANCELLED":
+            error_response(
+                status.HTTP_409_CONFLICT,
+                "ORDER_ALREADY_CANCELLED",
+                "This order has already been cancelled.",
+            )
+
+        # Step 3: Retrieve customer email
+        async with httpx.AsyncClient(timeout=10.0) as client:
+
+            customer_response = await client.get(
+                f"{CUSTOMER_SERVICE_URL}/customers/{order['customer_id']}"
+            )
+
+            if customer_response.status_code == 404:
+                error_response(
+                    status.HTTP_404_NOT_FOUND,
+                    "CUSTOMER_NOT_FOUND",
+                    "Customer information was not found.",
+                )
+
+            customer_response.raise_for_status()
+
+            customer = customer_response.json()
+
+        customer_email = customer.get("email")
+
+        if not customer_email:
+            error_response(
+                status.HTTP_502_BAD_GATEWAY,
+                "CUSTOMER_EMAIL_MISSING",
+                "Customer Service did not return an email address.",
+            )
+
+        # Step 4: Publish cancellation event to SQS
+        sqs_response = await asyncio.to_thread(
+            publish_cancellation_event,
+            order_id,
+            customer_email,
+        )
+
+        logger.info(
+            "Cancellation event published for order %s",
+            order_id,
+        )
+
+        return {
+            "success": True,
+            "message": "Order cancellation event published successfully.",
+            "order_id": order_id,
+            "sqs_message_id": sqs_response["MessageId"],
+            "status": "CANCELLATION_REQUESTED",
+        }
+
+    except HTTPException:
+        raise
+
+    except httpx.HTTPError:
+
+        logger.exception("Customer Service communication failed")
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to retrieve customer information.",
+        )
+
+    except (ClientError, BotoCoreError):
+
+        logger.exception("AWS operation failed")
+
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to process cancellation request.",
+        )
 
 # --------------------------------------------------
 # CREATE order
