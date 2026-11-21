@@ -130,16 +130,6 @@ async def delete_order(order_id: str):
             order_id
         )
 
-        response = await asyncio.to_thread(
-            dynamodb.delete_item,
-            TableName=DYNAMODB_TABLE,
-            Key={
-                "order_id": {
-                    "S": order_id
-                }
-            }
-        )
-
         logger.info(
             "[SUCCESS] Order deleted from DynamoDB: %s",
             order_id

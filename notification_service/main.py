@@ -12,11 +12,3 @@ def home():
         "service": "Notification Service",
         "status": "running"
     }
-
-
-@app.get("/health")
-def health_check():
-    return {
-        "success": True,
-        "message": "Notification Service is healthy"
-    }
