@@ -8,7 +8,7 @@ app = FastAPI(title="OMS Customer Service")
 
 
 class CustomerCreate(BaseModel):
-    name: str
+    name: str 
     email: EmailStr
     phone: str
 
